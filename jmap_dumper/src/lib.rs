@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use jmap::{
     BytePropertyValue, Class, EClassCastFlags, EObjectFlags, EngineVersion, Enum,
     EnumPropertyValue, Function, Jmap, Metadata, Object, ObjectType, Package, Property,
-    PropertyType, PropertyValue, ScriptStruct, Struct,
+    PropertyType, PropertyValue, ScriptStruct, Struct, ValuesWrapper,
 };
 use mem::{BlockCache, Ctx, MachoCoreMem, ProcessHandle, Ptr};
 use objects::FOptionalProperty;
@@ -289,6 +289,8 @@ pub struct DumpOptions {
     pub names: bool,
     /// Print struct layouts before dumping
     pub verbose: bool,
+    /// Filter out objects whose path contains any of these substrings
+    pub filter_out_paths: Vec<String>,
 }
 
 pub fn dump(
@@ -312,8 +314,19 @@ async fn dump_async(
     struct_info: Option<Structs>,
     options: DumpOptions,
 ) -> Result<Jmap> {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let process_pid = match &input {
+        Input::Process(pid) => Some(*pid),
+        _ => None,
+    };
     let Source { mem, config, name } = open_source(input, overrides).await?;
     let ctx = connect_manual(mem, config, struct_info, options.verbose).await?;
+    // Pause the target while reading its memory so the object graph doesn't mutate mid-dump
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let _suspend_guard = match process_pid {
+        Some(pid) => Some(mem::ProcessSuspendGuard::suspend(pid)?),
+        None => None,
+    };
     dump_inner(ctx, &name, options).await
 }
 
@@ -754,8 +767,21 @@ async fn dump_one(
 
     let path = obj.path().await?;
 
+    let filtered = options
+        .filter_out_paths
+        .iter()
+        .any(|f| path.contains(f.as_str()));
+
     if options.verbose {
-        eprintln!("[{i}/{num}] {path}");
+        if filtered {
+            eprintln!("[{i}/{num}] [filtered] {path}");
+        } else {
+            eprintln!("[{i}/{num}] {path}");
+        }
+    }
+
+    if filtered {
+        return Ok(None);
     }
 
     Ok(read_object_type(obj, &path, options)
@@ -831,11 +857,30 @@ pub async fn read_object_type(
     path: &str,
     options: &DumpOptions,
 ) -> Result<Option<ObjectType>> {
-    let class = obj.class_private().read().await?;
-
     if !options.all && !path.starts_with("/Script/") {
+        // GameplayTagsManager and its per-source GameplayTagsList subobjects carry every tag the
+        // game registered (including C++ native tags); include them in default dumps so editor
+        // tooling can import the game's tags without a full --all dump.
+        // Keep in sync with filter_to_default_objects.
+        let mut keep = false;
+        if path.starts_with("/Engine/Transient.") && path.contains("GameplayTagsManager") {
+            let class_path = obj.class_private().read().await?.path().await?;
+            keep = class_path == "/Script/GameplayTags.GameplayTagsManager"
+                || class_path == "/Script/GameplayTags.GameplayTagsList";
+        }
+        if !keep {
+            return Ok(None);
+        }
+    }
+    if options
+        .filter_out_paths
+        .iter()
+        .any(|f| path.contains(f.as_str()))
+    {
         return Ok(None);
     }
+
+    let class = obj.class_private().read().await?;
     let object_flags = obj.object_flags().read().await?;
     let is_basic_object = object_flags.contains(EObjectFlags::RF_ArchetypeObject)
         || object_flags.contains(EObjectFlags::RF_ClassDefaultObject);
@@ -864,6 +909,116 @@ pub async fn read_object_type(
         ObjectType::Object(read_object(&obj).await?)
     };
     Ok(Some(object))
+}
+
+/// Reduces an existing (typically full --all) jmap to what a default dump would contain: native
+/// (/Script/) objects plus the GameplayTags manager/list instances. Mirrors the live-dump filter
+/// in read_object_type. Also drops vtable entries no kept object references.
+///
+/// Gameplay tags referenced only by asset property values (e.g. FGameplayTagContainers in cooked
+/// blueprints) are registered nowhere at game runtime, so before dropping the assets their tag
+/// names are harvested into a synthetic GameplayTagsList object that editor tooling picks up like
+/// any other dumped tag source.
+pub fn filter_to_default_objects(jmap: &mut Jmap) {
+    fn keep(path: &str, object: &ObjectType) -> bool {
+        if path.starts_with("/Script/") {
+            return true;
+        }
+        if path.starts_with("/Engine/Transient.") && path.contains("GameplayTagsManager") {
+            let class = &object.get_object().class;
+            return class == "/Script/GameplayTags.GameplayTagsManager"
+                || class == "/Script/GameplayTags.GameplayTagsList";
+        }
+        false
+    }
+
+    let mut asset_tags = BTreeSet::<String>::new();
+    for object in jmap.objects.values() {
+        match &object.get_object().property_values {
+            // Deserialized jmaps always hold raw JSON (untagged enum order)
+            ValuesWrapper::Raw(value) => collect_gameplay_tag_names(value, &mut asset_tags),
+            wrapper @ ValuesWrapper::Value(_) => {
+                if let Ok(value) = serde_json::to_value(wrapper) {
+                    collect_gameplay_tag_names(&value, &mut asset_tags);
+                }
+            }
+        }
+    }
+
+    jmap.objects.retain(|path, object| keep(path, object));
+
+    if !asset_tags.is_empty() {
+        eprintln!(
+            "Harvested {} gameplay tag names referenced by object property values",
+            asset_tags.len()
+        );
+        let rows = asset_tags
+            .into_iter()
+            .map(|tag| {
+                let mut row = OrderMap::new();
+                row.insert("Tag".to_string(), PropertyValue::Name(tag));
+                PropertyValue::Struct(row)
+            })
+            .collect::<Vec<_>>();
+        let mut values = OrderMap::new();
+        values.insert("GameplayTagList".to_string(), PropertyValue::Array(rows));
+        // The synthetic path satisfies the keep() filter above so re-slimming is idempotent
+        jmap.objects.insert(
+            "/Engine/Transient.GameplayTagsManager_0:HarvestedAssetTags".to_string(),
+            ObjectType::Object(Object {
+                address: 0.into(),
+                vtable: 0.into(),
+                object_flags: EObjectFlags::empty(),
+                outer: None,
+                class: "/Script/GameplayTags.GameplayTagsList".to_string(),
+                children: BTreeSet::new(),
+                property_values: ValuesWrapper::Value(values),
+            }),
+        );
+    }
+
+    let referenced_vtables: std::collections::HashSet<jmap::Address> = jmap
+        .objects
+        .values()
+        .flat_map(|object| {
+            let mut addresses = vec![object.get_object().vtable];
+            if let ObjectType::Class(class) = object {
+                if let Some(instance_vtable) = class.instance_vtable {
+                    addresses.push(instance_vtable);
+                }
+            }
+            addresses
+        })
+        .collect();
+    jmap.vtables
+        .retain(|address, _| referenced_vtables.contains(address));
+}
+
+/// Collects gameplay tag names from dumped property values. FGameplayTag reflects as a struct
+/// whose only member is an FName called TagName, so any single-key {"TagName": "..."} object is
+/// treated as a tag; this also covers FGameplayTagContainer (arrays of tags plus ParentTags).
+fn collect_gameplay_tag_names(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(serde_json::Value::String(tag)) = map.get("TagName") {
+                    if !tag.is_empty() && tag != "None" {
+                        out.insert(tag.clone());
+                    }
+                    return;
+                }
+            }
+            for child in map.values() {
+                collect_gameplay_tag_names(child, out);
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for child in array {
+                collect_gameplay_tag_names(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn opt_path<T>(opt: Option<Ptr<T>>) -> Result<Option<String>>

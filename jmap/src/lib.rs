@@ -662,7 +662,9 @@ pub enum PropertyType {
     FieldPath,
     #[serde(rename = "OptionalProperty")]
     Optional { inner: Box<Property> },
-    #[serde(rename = "FUtf8StrProperty")]
+    // Historically emitted with a stray F prefix; the alias keeps old dumps readable. Consumers
+    // that feed the discriminator to FField::Construct need the unprefixed field class name.
+    #[serde(rename = "Utf8StrProperty", alias = "FUtf8StrProperty")]
     Utf8Str,
     #[serde(rename = "AnsiStrProperty")]
     AnsiStr,

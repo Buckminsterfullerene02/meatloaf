@@ -67,9 +67,15 @@ struct Cli {
     #[arg(long, short)]
     struct_info: Option<PathBuf>,
 
-    /// Dump all objects instead of only native (/Script/) objects
+    /// Dump all objects instead of only native (/Script/) objects plus GameplayTags instances.
+    /// With --jmap input, controls whether the existing dump is filtered down to the default
+    /// object set when re-emitting (e.g. to slim a full dump for editor consumption).
     #[arg(long)]
     all: bool,
+
+    /// Filter out objects whose path contains the given substring (can be specified multiple times)
+    #[arg(long, value_name = "PATH_PREFIX")]
+    filter_out_paths: Vec<String>,
 
     /// Dump FName table
     #[arg(long)]
@@ -129,6 +135,7 @@ fn main() -> Result<()> {
         all: cli.all,
         names: cli.names,
         verbose: cli.verbose,
+        filter_out_paths: cli.filter_out_paths,
     };
 
     let overrides = ConfigOverrides {
@@ -147,7 +154,7 @@ fn main() -> Result<()> {
 
     let reflection_data: Jmap = if let Some(path) = cli.jmap {
         let filename = path.file_name().unwrap().to_str().unwrap();
-        if filename.ends_with(".jmap.gz") {
+        let mut data: Jmap = if filename.ends_with(".jmap.gz") {
             let compressed = std::fs::read(path)?;
             let decoder = flate2::read::GzDecoder::new(Cursor::new(&compressed));
             serde_json::from_reader(decoder)?
@@ -155,7 +162,17 @@ fn main() -> Result<()> {
             serde_json::from_slice(&std::fs::read(path)?)?
         } else {
             bail!("Error: Expected .jmap or .jmap.gz file as input");
+        };
+        if !cli.all {
+            let objects_before = data.objects.len();
+            jmap_dumper::filter_to_default_objects(&mut data);
+            println!(
+                "Filtered input jmap to the default object set: kept {} of {} objects (pass --all to keep everything)",
+                data.objects.len(),
+                objects_before
+            );
         }
+        data
     } else if let Some(pid) = cli.pid {
         jmap_dumper::dump(Input::Process(pid), overrides, struct_info, options)?
     } else if let Some(path) = cli.minidump {
