@@ -974,9 +974,7 @@ pub fn filter_to_default_objects(jmap: &mut Jmap) {
             .into_iter()
             .map(|tag| {
                 let mut row = OrderMap::new();
-                // Use the same "TagName" key collect_gameplay_tag_names looks for, so re-slimming
-                // an already-slimmed jmap re-discovers these tags instead of losing them.
-                row.insert("TagName".to_string(), PropertyValue::Name(tag));
+                row.insert("Tag".to_string(), PropertyValue::Name(tag));
                 PropertyValue::Struct(row)
             })
             .collect::<Vec<_>>();
@@ -1018,16 +1016,11 @@ pub fn filter_to_default_objects(jmap: &mut Jmap) {
 /// Collects gameplay tag names from dumped property values. FGameplayTag reflects as a struct
 /// whose only member is an FName called TagName, so any single-key {"TagName": "..."} object is
 /// treated as a tag; this also covers FGameplayTagContainer (arrays of tags plus ParentTags).
-/// FGameplayTagTableRow (the rows of a dumped UGameplayTagsList) is likewise a single FName named
-/// Tag, so {"Tag": "..."} is treated the same way — this lets re-slimming an already-slimmed jmap
-/// re-discover the tags held by a real dumped HarvestedAssetTags object.
 fn collect_gameplay_tag_names(value: &serde_json::Value, out: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(map) => {
             if map.len() == 1 {
-                if let Some(serde_json::Value::String(tag)) =
-                    map.get("TagName").or_else(|| map.get("Tag"))
-                {
+                if let Some(serde_json::Value::String(tag)) = map.get("TagName") {
                     if !tag.is_empty() && tag != "None" {
                         out.insert(tag.clone());
                     }
