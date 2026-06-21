@@ -291,6 +291,10 @@ pub struct DumpOptions {
     pub verbose: bool,
     /// Filter out objects whose path contains any of these substrings
     pub filter_out_paths: Vec<String>,
+    /// Collect a full dump internally, then immediately reduce it to the default object set via
+    /// `filter_to_default_objects` (which also harvests gameplay tags from the assets dropped in
+    /// the process), skipping the need to write a separate --all jmap and re-load it.
+    pub suzie: bool,
 }
 
 pub fn dump(
@@ -312,13 +316,19 @@ async fn dump_async(
     input: Input,
     overrides: ConfigOverrides,
     struct_info: Option<Structs>,
-    options: DumpOptions,
+    mut options: DumpOptions,
 ) -> Result<Jmap> {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let process_pid = match &input {
         Input::Process(pid) => Some(*pid),
         _ => None,
     };
+    let suzie = options.suzie;
+    if suzie {
+        // filter_to_default_objects needs every object's property values in hand to harvest
+        // gameplay tags referenced only by assets, so collect everything up front.
+        options.all = true;
+    }
     let Source { mem, config, name } = open_source(input, overrides).await?;
     let ctx = connect_manual(mem, config, struct_info, options.verbose).await?;
     // Pause the target while reading its memory so the object graph doesn't mutate mid-dump
@@ -327,7 +337,11 @@ async fn dump_async(
         Some(pid) => Some(mem::ProcessSuspendGuard::suspend(pid)?),
         None => None,
     };
-    dump_inner(ctx, &name, options).await
+    let mut jmap = dump_inner(ctx, &name, options).await?;
+    if suzie {
+        filter_to_default_objects(&mut jmap);
+    }
+    Ok(jmap)
 }
 
 async fn open_source(input: Input, overrides: ConfigOverrides) -> Result<Source> {
@@ -919,6 +933,10 @@ pub async fn read_object_type(
 /// blueprints) are registered nowhere at game runtime, so before dropping the assets their tag
 /// names are harvested into a synthetic GameplayTagsList object that editor tooling picks up like
 /// any other dumped tag source.
+/// Path of the synthetic object `filter_to_default_objects` harvests asset-referenced (and
+/// native) gameplay tags into.
+const HARVESTED_TAGS_PATH: &str = "/Engine/Transient.GameplayTagsManager_0:HarvestedAssetTags";
+
 pub fn filter_to_default_objects(jmap: &mut Jmap) {
     fn keep(path: &str, object: &ObjectType) -> bool {
         if path.starts_with("/Script/") {
@@ -956,7 +974,9 @@ pub fn filter_to_default_objects(jmap: &mut Jmap) {
             .into_iter()
             .map(|tag| {
                 let mut row = OrderMap::new();
-                row.insert("Tag".to_string(), PropertyValue::Name(tag));
+                // Use the same "TagName" key collect_gameplay_tag_names looks for, so re-slimming
+                // an already-slimmed jmap re-discovers these tags instead of losing them.
+                row.insert("TagName".to_string(), PropertyValue::Name(tag));
                 PropertyValue::Struct(row)
             })
             .collect::<Vec<_>>();
@@ -964,7 +984,7 @@ pub fn filter_to_default_objects(jmap: &mut Jmap) {
         values.insert("GameplayTagList".to_string(), PropertyValue::Array(rows));
         // The synthetic path satisfies the keep() filter above so re-slimming is idempotent
         jmap.objects.insert(
-            "/Engine/Transient.GameplayTagsManager_0:HarvestedAssetTags".to_string(),
+            HARVESTED_TAGS_PATH.to_string(),
             ObjectType::Object(Object {
                 address: 0.into(),
                 vtable: 0.into(),
@@ -994,14 +1014,20 @@ pub fn filter_to_default_objects(jmap: &mut Jmap) {
         .retain(|address, _| referenced_vtables.contains(address));
 }
 
+
 /// Collects gameplay tag names from dumped property values. FGameplayTag reflects as a struct
 /// whose only member is an FName called TagName, so any single-key {"TagName": "..."} object is
 /// treated as a tag; this also covers FGameplayTagContainer (arrays of tags plus ParentTags).
+/// FGameplayTagTableRow (the rows of a dumped UGameplayTagsList) is likewise a single FName named
+/// Tag, so {"Tag": "..."} is treated the same way — this lets re-slimming an already-slimmed jmap
+/// re-discover the tags held by a real dumped HarvestedAssetTags object.
 fn collect_gameplay_tag_names(value: &serde_json::Value, out: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(map) => {
             if map.len() == 1 {
-                if let Some(serde_json::Value::String(tag)) = map.get("TagName") {
+                if let Some(serde_json::Value::String(tag)) =
+                    map.get("TagName").or_else(|| map.get("Tag"))
+                {
                     if !tag.is_empty() && tag != "None" {
                         out.insert(tag.clone());
                     }

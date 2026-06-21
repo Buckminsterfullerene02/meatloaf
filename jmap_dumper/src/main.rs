@@ -70,8 +70,14 @@ struct Cli {
     /// Dump all objects instead of only native (/Script/) objects plus GameplayTags instances.
     /// With --jmap input, controls whether the existing dump is filtered down to the default
     /// object set when re-emitting (e.g. to slim a full dump for editor consumption).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "suzie")]
     all: bool,
+
+    /// Collect a full dump in memory and immediately slim it down to the default object set
+    /// (native objects, GameplayTags manager/list, plus gameplay tags harvested from assets that
+    /// get dropped)
+    #[arg(long, conflicts_with = "jmap")]
+    suzie: bool,
 
     /// Filter out objects whose path contains the given substring (can be specified multiple times)
     #[arg(long, value_name = "PATH_PREFIX")]
@@ -85,9 +91,13 @@ struct Cli {
     #[arg(long, short = 'v')]
     verbose: bool,
 
-    /// Output dump .jmap path
+    /// When dumping to a .h/.hpp file, omit property offset comments
+    #[arg(long)]
+    no_offsets: bool,
+
+    /// Output dump path (.jmap, .jmap.gz, .usmap, or .h/.hpp).
     #[arg(index = 1)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 }
 
 fn parse_hex_u64(s: &str) -> Result<u64, String> {
@@ -117,13 +127,21 @@ fn main() -> Result<()> {
         Header,
     }
 
-    let output_type = match cli.output.file_name().and_then(|e| e.to_str()) {
-        Some(n) if n.ends_with(".jmap") => OutputType::Jmap,
-        Some(n) if n.ends_with(".jmap.gz") => OutputType::JmapGz,
-        Some(n) if n.ends_with(".usmap") => OutputType::Usmap,
-        Some(n) if n.ends_with(".h") || n.ends_with(".hpp") => OutputType::Header,
-        _ => bail!("Error: Expected .jmap, .jmap.gz, .usmap, or .hpp output type"),
-    };
+    if cli.output.is_none() {
+        bail!("Error: Expected an output path");
+    }
+
+    let output_type = cli
+        .output
+        .as_ref()
+        .map(|output| match output.file_name().and_then(|e| e.to_str()) {
+            Some(n) if n.ends_with(".jmap") => Ok(OutputType::Jmap),
+            Some(n) if n.ends_with(".jmap.gz") => Ok(OutputType::JmapGz),
+            Some(n) if n.ends_with(".usmap") => Ok(OutputType::Usmap),
+            Some(n) if n.ends_with(".h") || n.ends_with(".hpp") => Ok(OutputType::Header),
+            _ => bail!("Error: Expected .jmap, .jmap.gz, .usmap, or .hpp output type"),
+        })
+        .transpose()?;
 
     let struct_info: Option<Structs> = if let Some(path) = cli.struct_info {
         Some(serde_json::from_slice(&std::fs::read(path)?)?)
@@ -136,6 +154,7 @@ fn main() -> Result<()> {
         names: cli.names,
         verbose: cli.verbose,
         filter_out_paths: cli.filter_out_paths,
+        suzie: cli.suzie,
     };
 
     let overrides = ConfigOverrides {
@@ -183,30 +202,32 @@ fn main() -> Result<()> {
         unreachable!();
     };
 
-    match output_type {
-        OutputType::Jmap => {
-            let mut file = BufWriter::new(File::create(&cli.output)?);
-            serde_json::to_writer_pretty(&mut file, &reflection_data)?;
+    if let (Some(output), Some(output_type)) = (&cli.output, output_type) {
+        match output_type {
+            OutputType::Jmap => {
+                let mut file = BufWriter::new(File::create(output)?);
+                serde_json::to_writer_pretty(&mut file, &reflection_data)?;
+            }
+            OutputType::JmapGz => {
+                let mut file = BufWriter::new(File::create(output)?);
+                let mut e =
+                    flate2::write::GzEncoder::new(&mut file, flate2::Compression::default());
+                serde_json::to_writer_pretty(&mut e, &reflection_data)?;
+                e.finish()?;
+            }
+            OutputType::Usmap => {
+                let usmap = into_usmap(&reflection_data);
+                usmap.write(&mut std::io::BufWriter::new(std::fs::File::create(output)?))?;
+            }
+            OutputType::Header => {
+                let header = into_header(&reflection_data, cli.no_offsets);
+                std::fs::write(output, header)?;
+            }
         }
-        OutputType::JmapGz => {
-            let mut file = BufWriter::new(File::create(&cli.output)?);
-            let mut e = flate2::write::GzEncoder::new(&mut file, flate2::Compression::default());
-            serde_json::to_writer_pretty(&mut e, &reflection_data)?;
-            e.finish()?;
-        }
-        OutputType::Usmap => {
-            let usmap = into_usmap(&reflection_data);
-            usmap.write(&mut std::io::BufWriter::new(std::fs::File::create(
-                &cli.output,
-            )?))?;
-        }
-        OutputType::Header => {
-            let header = into_header(&reflection_data);
-            std::fs::write(&cli.output, header)?;
-        }
+        println!("Success! Output written to {}", output.display());
+    } else {
+        println!("Success!");
     }
-
-    println!("Success! Output written to {}", cli.output.display());
 
     Ok(())
 }

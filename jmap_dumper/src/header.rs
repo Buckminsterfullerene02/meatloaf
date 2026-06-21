@@ -193,6 +193,7 @@ fn generate_struct_or_class(
     path: &str,
     struct_obj: &Struct,
     keyword: &str,
+    no_offsets: bool,
 ) {
     let name = get_class_name(objects, path);
 
@@ -214,12 +215,16 @@ fn generate_struct_or_class(
             String::new()
         };
 
-        writeln!(
-            buffer,
-            "    /* 0x{:04x} */ {} {}{};",
-            prop.offset, type_name, prop.name, array_suffix
-        )
-        .unwrap();
+        if no_offsets {
+            writeln!(buffer, "    {} {}{};", type_name, prop.name, array_suffix).unwrap();
+        } else {
+            writeln!(
+                buffer,
+                "    /* 0x{:04x} */ {} {}{};",
+                prop.offset, type_name, prop.name, array_suffix
+            )
+            .unwrap();
+        }
     }
 
     let functions = get_class_functions(objects, struct_obj);
@@ -234,7 +239,7 @@ fn generate_struct_or_class(
     writeln!(buffer).unwrap();
 }
 
-pub fn into_header(reflection_data: &Jmap) -> String {
+pub fn into_header(reflection_data: &Jmap, no_offsets: bool) -> String {
     let mut buffer = String::new();
 
     let objects = &reflection_data.objects;
@@ -258,10 +263,18 @@ pub fn into_header(reflection_data: &Jmap) -> String {
                     path,
                     &script_struct.r#struct,
                     "struct",
+                    no_offsets,
                 );
             }
             ObjectType::Class(class) => {
-                generate_struct_or_class(&mut buffer, objects, path, &class.r#struct, "class");
+                generate_struct_or_class(
+                    &mut buffer,
+                    objects,
+                    path,
+                    &class.r#struct,
+                    "class",
+                    no_offsets,
+                );
             }
             _ => {}
         }
