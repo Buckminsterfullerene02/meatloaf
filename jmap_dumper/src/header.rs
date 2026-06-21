@@ -197,7 +197,10 @@ fn generate_struct_or_class(
 ) {
     let name = get_class_name(objects, path);
 
-    writeln!(buffer, "// Size: 0x{:x}", struct_obj.properties_size).unwrap();
+    if !no_offsets {
+        writeln!(buffer, "// Size: 0x{:x}", struct_obj.properties_size).unwrap();
+    }
+    
     write!(buffer, "{} {}", keyword, name).unwrap();
 
     if let Some(super_path) = &struct_obj.super_struct {
