@@ -164,12 +164,13 @@ fn main() -> Result<()> {
         _ => diag::Verbosity::Trace,
     });
 
-    if cli.output.is_none() {
+    let Some(output) = cli.output.as_ref() else {
         bail!("Error: Expected an output path");
-    }
-    let to_stdout = cli.output.as_os_str() == "-";
+    };
 
-    let format = match (cli.format, cli.output.file_name().and_then(|e| e.to_str())) {
+    let to_stdout = output.as_os_str() == "-";
+
+    let format = match (cli.format, output.file_name().and_then(|e| e.to_str())) {
         (Some(format), _) => format,
         (None, Some(n)) if n.ends_with(".jmap.gz") => OutputFormat::JmapGz,
         (None, Some(n)) if n.ends_with(".jmap") => OutputFormat::Jmap,
@@ -187,7 +188,7 @@ fn main() -> Result<()> {
     let options = DumpOptions {
         all: cli.all,
         names: cli.names,
-        verbose: cli.verbose,
+        verbose: cli.verbose > 0,
         filter_out_paths: cli.filter_out_paths,
         suzie: cli.suzie,
         skip_vtables: cli.skip_vtables,
@@ -250,7 +251,7 @@ fn main() -> Result<()> {
     let mut out: BufWriter<Box<dyn Write>> = BufWriter::new(if to_stdout {
         Box::new(stdout.lock())
     } else {
-        Box::new(File::create(&cli.output)?)
+        Box::new(File::create(output)?)
     });
 
     match format {
@@ -266,7 +267,7 @@ fn main() -> Result<()> {
             into_usmap(&reflection_data).write(&mut out)?;
         }
         OutputFormat::Header => {
-            out.write_all(into_header(&reflection_data).as_bytes())?;
+            out.write_all(into_header(&reflection_data, cli.no_offsets).as_bytes())?;
         }
     }
     out.flush()?;

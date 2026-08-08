@@ -774,6 +774,9 @@ async fn dump_one(
 
     if obj.vtable().address() == 0 {
         return Ok(None);
+    }
+
+    let path = obj.path().await?;
 
     let filtered = options
         .filter_out_paths
@@ -796,8 +799,6 @@ async fn dump_one(
         crate::warn!("skipping bad GUObjectArray entry {i}: {:#x}", obj.address());
         return Ok(None);
     }
-
-    let path = obj.path().await?;
 
     if filtered {
         return Ok(None);
