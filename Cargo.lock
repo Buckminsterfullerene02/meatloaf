@@ -1129,7 +1129,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jmap"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bitflags",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "jmap_dumper"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "ue_binja"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "binaryninja",
@@ -2313,7 +2313,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "usmap"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "byteorder",

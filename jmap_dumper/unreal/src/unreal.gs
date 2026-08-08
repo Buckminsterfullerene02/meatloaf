@@ -96,11 +96,14 @@ struct STUB {};
 struct FRepRecord {
     uint32_t Placeholder;
 };
+/// TEST
 struct FImplementedInterface {
-    uint64_t Placeholder[2];
+    if (UE_VERSION >= 503) TObjectPtr<UClass> Class; else UClass* Class;
+    int32_t PointerOffset;
+    bool bImplementedByK2;
 };
 struct FGCReferenceTokenStream {
-    uint64_t Placeholder1[2]; // TArray Tokens
+    TArray<uint32_t> Tokens;
     if (UE_VERSION >= 500 && UE_VERSION < 502) {
         uint64_t Placeholder2; // StackSize + TokenType in UE 5.0-5.1 only
     }

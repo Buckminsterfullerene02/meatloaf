@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use jmap::Jmap;
-use jmap_dumper::{ConfigOverrides, DumpOptions, Input, into_header, structs::Structs};
-use std::io::Cursor;
+use jmap_dumper::{ConfigOverrides, DumpOptions, Input, diag, into_header, structs::Structs};
+use std::io::{Cursor, Write};
 use std::{collections::BTreeMap, fs::File, io::BufWriter, path::PathBuf};
 
 #[derive(Parser, Debug)]
@@ -59,6 +59,18 @@ struct Cli {
     #[arg(long)]
     pack_fuobject_item: bool,
 
+    /// Editor build: sets UE_EDITOR, WITH_EDITOR and WITH_EDITORONLY_DATA
+    #[arg(long)]
+    editor: bool,
+
+    /// Build has stats enabled (STATS): any non-shipping/test target, editor or not
+    #[arg(long)]
+    stats: bool,
+
+    /// Build has FUObjectItem Flags+RefCount
+    #[arg(long)]
+    fuobject_flags_refcount: bool,
+
     /// Target triple for struct layout, e.g. aarch64-linux-android (defaults to x86_64-pc-windows-msvc)
     #[arg(long, value_parser = jmap_dumper::structs::parse_target_triplet, value_name = "TRIPLE")]
     target: Option<jmap_dumper::structs::TargetTriplet>,
@@ -87,17 +99,42 @@ struct Cli {
     #[arg(long)]
     names: bool,
 
-    /// Print struct layouts before dumping
-    #[arg(long, short = 'v')]
-    verbose: bool,
+    /// Verbosity
+    #[arg(long, short = 'v', action = clap::ArgAction::Count, conflicts_with = "quiet")]
+    verbose: u8,
 
     /// When dumping to a .h/.hpp file, omit property offset comments
     #[arg(long)]
     no_offsets: bool,
 
     /// Output dump path (.jmap, .jmap.gz, .usmap, or .h/.hpp).
+    /// Suppress warnings and the summary line; only errors are printed
+    #[arg(long, short = 'q')]
+    quiet: bool,
+
+    /// Skip vtables
+    #[arg(long)]
+    skip_vtables: bool,
+
+    /// Skip objects
+    #[arg(long)]
+    skip_objects: bool,
+
+    /// Output format (default: inferred from the output file extension, else jmap)
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+
+    /// Output dump path (.jmap, .jmap.gz, .usmap, .h/.hpp), or `-` for stdout
     #[arg(index = 1)]
     output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum OutputFormat {
+    Jmap,
+    JmapGz,
+    Usmap,
+    Header,
 }
 
 fn parse_hex_u64(s: &str) -> Result<u64, String> {
@@ -120,28 +157,26 @@ fn parse_engine_version(s: &str) -> Result<(u16, u16), String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    enum OutputType {
-        Jmap,
-        JmapGz,
-        Usmap,
-        Header,
-    }
+    diag::set_verbosity(match (cli.quiet, cli.verbose) {
+        (true, _) => diag::Verbosity::Quiet,
+        (_, 0) => diag::Verbosity::Normal,
+        (_, 1) => diag::Verbosity::Verbose,
+        _ => diag::Verbosity::Trace,
+    });
 
     if cli.output.is_none() {
         bail!("Error: Expected an output path");
     }
+    let to_stdout = cli.output.as_os_str() == "-";
 
-    let output_type = cli
-        .output
-        .as_ref()
-        .map(|output| match output.file_name().and_then(|e| e.to_str()) {
-            Some(n) if n.ends_with(".jmap") => Ok(OutputType::Jmap),
-            Some(n) if n.ends_with(".jmap.gz") => Ok(OutputType::JmapGz),
-            Some(n) if n.ends_with(".usmap") => Ok(OutputType::Usmap),
-            Some(n) if n.ends_with(".h") || n.ends_with(".hpp") => Ok(OutputType::Header),
-            _ => bail!("Error: Expected .jmap, .jmap.gz, .usmap, or .hpp output type"),
-        })
-        .transpose()?;
+    let format = match (cli.format, cli.output.file_name().and_then(|e| e.to_str())) {
+        (Some(format), _) => format,
+        (None, Some(n)) if n.ends_with(".jmap.gz") => OutputFormat::JmapGz,
+        (None, Some(n)) if n.ends_with(".jmap") => OutputFormat::Jmap,
+        (None, Some(n)) if n.ends_with(".usmap") => OutputFormat::Usmap,
+        (None, Some(n)) if n.ends_with(".h") || n.ends_with(".hpp") => OutputFormat::Header,
+        _ => OutputFormat::Jmap,
+    };
 
     let struct_info: Option<Structs> = if let Some(path) = cli.struct_info {
         Some(serde_json::from_slice(&std::fs::read(path)?)?)
@@ -155,6 +190,8 @@ fn main() -> Result<()> {
         verbose: cli.verbose,
         filter_out_paths: cli.filter_out_paths,
         suzie: cli.suzie,
+        skip_vtables: cli.skip_vtables,
+        skip_objects: cli.skip_objects,
     };
 
     let overrides = ConfigOverrides {
@@ -163,10 +200,17 @@ fn main() -> Result<()> {
         engine_version: cli.engine_version,
         image_base: cli.image_base,
         build_change_list: cli.build_changelist.clone(),
-        // Presence of the flag forces case-preserving on; absence means auto-detect via the memory probe.
-        case_preserving: cli.case_preserving.then_some(true),
-        // Presence forces packing on; absence leaves the default (off).
-        pack_fuobject_item: cli.pack_fuobject_item.then_some(true),
+        build_config: jmap_dumper::structs::BuildConfig {
+            case_preserving: cli.case_preserving,
+            pack_fuobject_item: cli.pack_fuobject_item,
+            stats: cli.stats,
+            fuobject_flags_refcount: cli.fuobject_flags_refcount,
+            ..if cli.editor {
+                jmap_dumper::structs::BuildConfig::editor()
+            } else {
+                Default::default()
+            }
+        },
         target_triplet: cli.target,
         module: cli.module.clone(),
     };
@@ -202,34 +246,62 @@ fn main() -> Result<()> {
         unreachable!();
     };
 
-    if let (Some(output), Some(output_type)) = (&cli.output, output_type) {
-        match output_type {
-            OutputType::Jmap => {
-                let mut file = BufWriter::new(File::create(output)?);
-                serde_json::to_writer_pretty(&mut file, &reflection_data)?;
-            }
-            OutputType::JmapGz => {
-                let mut file = BufWriter::new(File::create(output)?);
-                let mut e =
-                    flate2::write::GzEncoder::new(&mut file, flate2::Compression::default());
-                serde_json::to_writer_pretty(&mut e, &reflection_data)?;
-                e.finish()?;
-            }
-            OutputType::Usmap => {
-                let usmap = into_usmap(&reflection_data);
-                usmap.write(&mut std::io::BufWriter::new(std::fs::File::create(output)?))?;
-            }
-            OutputType::Header => {
-                let header = into_header(&reflection_data, cli.no_offsets);
-                std::fs::write(output, header)?;
-            }
-        }
-        println!("Success! Output written to {}", output.display());
+    let stdout = std::io::stdout();
+    let mut out: BufWriter<Box<dyn Write>> = BufWriter::new(if to_stdout {
+        Box::new(stdout.lock())
     } else {
-        println!("Success!");
+        Box::new(File::create(&cli.output)?)
+    });
+
+    match format {
+        OutputFormat::Jmap => {
+            serde_json::to_writer_pretty(&mut out, &reflection_data)?;
+        }
+        OutputFormat::JmapGz => {
+            let mut e = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+            serde_json::to_writer_pretty(&mut e, &reflection_data)?;
+            e.finish()?;
+        }
+        OutputFormat::Usmap => {
+            into_usmap(&reflection_data).write(&mut out)?;
+        }
+        OutputFormat::Header => {
+            out.write_all(into_header(&reflection_data).as_bytes())?;
+        }
+    }
+    out.flush()?;
+
+    if !cli.quiet {
+        // keep the data stream on stdout clean when that's where the dump went
+        let summary = summary(&reflection_data);
+        if to_stdout {
+            eprintln!("{summary}");
+        } else {
+            println!("{summary}");
+        }
     }
 
     Ok(())
+}
+
+fn summary(jmap: &Jmap) -> String {
+    let mut parts = vec![];
+    if let Some(meta) = &jmap.metadata {
+        parts.push(format!(
+            "UE {}.{}",
+            meta.engine_version.major, meta.engine_version.minor
+        ));
+        if let Some(cl) = &meta.build_change_list {
+            parts.push(cl.clone());
+        }
+    }
+    parts.push(format!("{} objects", jmap.objects.len()));
+    parts.push(format!("{} vtables", jmap.vtables.len()));
+    let warnings = diag::warning_count();
+    if warnings > 0 {
+        parts.push(format!("{warnings} warnings"));
+    }
+    parts.join(" ")
 }
 
 fn obj_name(path: &str) -> &str {

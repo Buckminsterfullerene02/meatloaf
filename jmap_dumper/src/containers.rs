@@ -157,7 +157,7 @@ impl Ptr<FNameEntryAllocator> {
 
 pub async fn resolve_fname(ctx: &Ctx, comparison_index: u32, number: u32) -> Result<String> {
     let fnamepool = ctx.fnamepool;
-    let case_preserving = ctx.case_preserving;
+    let case_preserving = ctx.build_config.case_preserving;
 
     if ctx.ue_version() < (4, 22) {
         let chunks = Ptr::<Ptr<Ptr<Ptr<()>>>>::new(fnamepool, ctx.clone())?
@@ -251,7 +251,7 @@ pub async fn extract_fnames(ctx: &Ctx) -> Result<BTreeMap<u32, String>> {
 
     let fname_pool_address = ctx.fnamepool;
     let ue_version = ctx.ue_version();
-    let case_preserving = ctx.case_preserving;
+    let case_preserving = ctx.build_config.case_preserving;
 
     if ue_version < (4, 22) {
         let per_chunk: usize = 0x4000;
@@ -375,8 +375,13 @@ pub async fn extract_fnames(ctx: &Ctx) -> Result<BTreeMap<u32, String>> {
 pub struct FScriptArray;
 impl Ptr<FScriptArray> {
     pub fn data(&self) -> Ptr<Option<Ptr<u8>>> {
-        let offset = self.ctx().struct_member("FScriptArray", "Data");
-        self.byte_offset(offset).cast()
+        let alloc_offset = self
+            .ctx()
+            .struct_member("FScriptArray", "AllocatorInstance");
+        let data_offset = self
+            .ctx()
+            .struct_member("FDefaultAllocatorInstance", "Data");
+        self.byte_offset(alloc_offset + data_offset).cast()
     }
     pub fn num(&self) -> Ptr<i32> {
         let offset = self.ctx().struct_member("FScriptArray", "ArrayNum");

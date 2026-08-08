@@ -180,6 +180,10 @@ impl Ptr<UObject> {
         let offset = self.ctx().struct_member("UObject", "ObjectFlags");
         self.byte_offset(offset).cast()
     }
+    pub fn internal_index(&self) -> Ptr<i32> {
+        let offset = self.ctx().struct_member("UObject", "InternalIndex");
+        self.byte_offset(offset).cast()
+    }
     pub fn class_private(&self) -> Ptr<Ptr<UClass>> {
         let offset = self.ctx().struct_member("UObject", "ClassPrivate");
         self.byte_offset(offset).cast()
@@ -267,6 +271,53 @@ impl Ptr<UClass> {
         let offset = self.ctx().struct_member("UClass", "ClassDefaultObject");
         self.byte_offset(offset).cast()
     }
+    pub fn interfaces(&self) -> Ptr<TArray<()>> {
+        let offset = self.ctx().struct_member("UClass", "Interfaces");
+        self.byte_offset(offset).cast()
+    }
+    pub async fn read_interfaces(&self) -> Result<Vec<(Option<Ptr<UClass>>, i32, bool)>> {
+        let len = self.interfaces().len().await?;
+        if len == 0 {
+            return Ok(vec![]);
+        }
+        let Some(data) = self.interfaces().data().await? else {
+            return Ok(vec![]);
+        };
+        let data: Ptr<FImplementedInterface> = data.cast();
+        let size = self.ctx().get_struct("FImplementedInterface").size as usize;
+
+        let mut interfaces = Vec::with_capacity(len);
+        for i in 0..len {
+            let elm = data.byte_offset(i * size);
+            interfaces.push((
+                elm.class().read().await?,
+                elm.pointer_offset().read().await?,
+                elm.implemented_by_k2().read().await? != 0,
+            ));
+        }
+        Ok(interfaces)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FImplementedInterface;
+impl Ptr<FImplementedInterface> {
+    pub fn class(&self) -> Ptr<Option<Ptr<UClass>>> {
+        let offset = self.ctx().struct_member("FImplementedInterface", "Class");
+        self.byte_offset(offset).cast()
+    }
+    pub fn pointer_offset(&self) -> Ptr<i32> {
+        let offset = self
+            .ctx()
+            .struct_member("FImplementedInterface", "PointerOffset");
+        self.byte_offset(offset).cast()
+    }
+    pub fn implemented_by_k2(&self) -> Ptr<u8> {
+        let offset = self
+            .ctx()
+            .struct_member("FImplementedInterface", "bImplementedByK2");
+        self.byte_offset(offset).cast()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -346,9 +397,15 @@ impl Ptr<FNameData> {
 impl Ptr<UEnum> {
     pub async fn read_names(&self) -> Result<Vec<(String, i64)>> {
         let version = self.ctx().ue_version();
+        let uenum = self.ctx().get_struct("UEnum");
+        let off = |n: &str| uenum.members.iter().find(|m| m.name == n).map(|m| m.offset);
+        let names_size = match (off("Names"), off("CppForm")) {
+            (Some(a), Some(b)) => b - a,
+            _ => 0,
+        };
 
-        if version >= (5, 7) {
-            // UE 5.7+: FNameData
+        if names_size >= 24 {
+            // FNameData
             let name_data: Ptr<FNameData> = self.names().cast();
             let len = name_data.num_values().read().await? as usize;
             if len == 0 {
@@ -771,8 +828,25 @@ impl Ptr<FChunkedFixedUObjectArray> {
             .struct_member("FChunkedFixedUObjectArray", "NumElements");
         self.byte_offset(offset).cast()
     }
+    pub fn max_elements(&self) -> Ptr<i32> {
+        let offset = self
+            .ctx()
+            .struct_member("FChunkedFixedUObjectArray", "MaxElements");
+        self.byte_offset(offset).cast()
+    }
+    pub fn max_chunks(&self) -> Ptr<i32> {
+        let offset = self
+            .ctx()
+            .struct_member("FChunkedFixedUObjectArray", "MaxChunks");
+        self.byte_offset(offset).cast()
+    }
+    pub async fn elements_per_chunk(&self) -> Result<usize> {
+        let max_elements = self.max_elements().read().await?;
+        let max_chunks = self.max_chunks().read().await?;
+        Ok((max_elements / max_chunks) as usize)
+    }
     pub async fn read_item_ptr(&self, item: usize) -> Result<Ptr<FUObjectItem>> {
-        let max_per_chunk = 64 * 1024;
+        let max_per_chunk = self.elements_per_chunk().await?;
         let chunk_index = item / max_per_chunk;
 
         Ok(self

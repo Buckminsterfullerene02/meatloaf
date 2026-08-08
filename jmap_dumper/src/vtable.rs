@@ -17,8 +17,8 @@ pub async fn analyze_vtables(
         let class = &object.class;
         if let Some(existing) = class_vtables.get(class) {
             if *existing != vtable {
-                eprintln!(
-                    "WARN: conflicting vtable for Class={class:?} Object={path:?}: existing {existing}, new {vtable}"
+                crate::warn!(
+                    "conflicting vtable for Class={class:?} Object={path:?}: existing {existing}, new {vtable}"
                 );
             }
         } else {

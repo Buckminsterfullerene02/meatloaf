@@ -1,4 +1,5 @@
 pub mod containers;
+pub mod diag;
 mod header;
 pub mod mem;
 pub mod objects;
@@ -17,8 +18,8 @@ use containers::{FName, FScriptMap, FScriptSet, FString};
 use futures_util::StreamExt;
 use jmap::{
     BytePropertyValue, Class, EClassCastFlags, EObjectFlags, EngineVersion, Enum,
-    EnumPropertyValue, Function, Jmap, Metadata, Object, ObjectType, Package, Property,
-    PropertyType, PropertyValue, ScriptStruct, Struct, ValuesWrapper,
+    EnumPropertyValue, Function, ImplementedInterface, Jmap, Metadata, Object, ObjectType, Package,
+    Property, PropertyType, PropertyValue, ScriptStruct, Struct, ValuesWrapper,
 };
 use mem::{BlockCache, Ctx, MachoCoreMem, ProcessHandle, Ptr};
 use objects::FOptionalProperty;
@@ -295,6 +296,10 @@ pub struct DumpOptions {
     /// `filter_to_default_objects` (which also harvests gameplay tags from the assets dropped in
     /// the process), skipping the need to write a separate --all jmap and re-load it.
     pub suzie: bool,
+    /// Skip vtable analysis
+    pub skip_vtables: bool,
+    /// Skip all objects
+    pub skip_objects: bool,
 }
 
 pub fn dump(
@@ -330,7 +335,7 @@ async fn dump_async(
         options.all = true;
     }
     let Source { mem, config, name } = open_source(input, overrides).await?;
-    let ctx = connect_manual(mem, config, struct_info, options.verbose).await?;
+    let ctx = connect_manual(mem, config, struct_info).await?;
     // Pause the target while reading its memory so the object graph doesn't mutate mid-dump
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let _suspend_guard = match process_pid {
@@ -380,7 +385,7 @@ async fn open_dump(path: PathBuf, mut overrides: ConfigOverrides) -> Result<Sour
 
     if let Some(module) = overrides.module.clone() {
         let base = module_base_from_minidump(minidump, &module)?;
-        eprintln!("resolved module {module:?} to load address 0x{base:x}");
+        crate::info!("resolved module {module:?} to load address 0x{base:x}");
         if let Some(off) = overrides.fname_pool.as_mut() {
             *off += base;
         }
@@ -392,7 +397,7 @@ async fn open_dump(path: PathBuf, mut overrides: ConfigOverrides) -> Result<Sour
 
     if overrides.target_triplet.is_none() {
         if let Some(inferred) = target_triplet_from_minidump(minidump) {
-            eprintln!("inferred target {inferred:?} from minidump SystemInfo");
+            crate::info!("inferred target {inferred:?} from minidump SystemInfo");
             overrides.target_triplet = Some(inferred);
         }
     }
@@ -481,20 +486,13 @@ pub async fn connect_pid(pid: i32, struct_info: Option<Structs>) -> Result<Ctx> 
     let handle: ProcessHandle = ProcessHandle::new(pid);
     let mem = BlockCache::wrap(handle);
     let image = patternsleuth::process::external::read_image_from_pid(pid)?;
-    connect(mem, &image, ConfigOverrides::default(), struct_info, false).await
+    connect(mem, &image, ConfigOverrides::default(), struct_info).await
 }
 
 pub async fn connect_pid_live(pid: i32, struct_info: Option<Structs>) -> Result<Ctx> {
     let handle: ProcessHandle = ProcessHandle::new(pid);
     let image = patternsleuth::process::external::read_image_from_pid(pid)?;
-    connect(
-        handle,
-        &image,
-        ConfigOverrides::default(),
-        struct_info,
-        false,
-    )
-    .await
+    connect(handle, &image, ConfigOverrides::default(), struct_info).await
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -507,9 +505,7 @@ pub struct Config {
     #[serde(default)]
     pub build_change_list: Option<String>,
     #[serde(default)]
-    pub case_preserving: bool,
-    #[serde(default)]
-    pub pack_fuobject_item: bool,
+    pub build_config: structs::BuildConfig,
     #[serde(default = "structs::default_target_triplet")]
     pub target_triplet: structs::TargetTriplet,
 }
@@ -521,8 +517,7 @@ pub struct ConfigOverrides {
     pub engine_version: Option<(u16, u16)>,
     pub image_base: Option<u64>,
     pub build_change_list: Option<String>,
-    pub case_preserving: Option<bool>,
-    pub pack_fuobject_item: Option<bool>,
+    pub build_config: structs::BuildConfig,
     /// Target triple: `None` defaults to win64 MSVC
     pub target_triplet: Option<structs::TargetTriplet>,
     /// Module name to resolve `fname_pool`/`guobject_array` as RVA offsets against
@@ -537,8 +532,7 @@ impl ConfigOverrides {
             engine_version: self.engine_version?,
             image_base: self.image_base.unwrap_or(0),
             build_change_list: self.build_change_list,
-            case_preserving: self.case_preserving.unwrap_or(false),
-            pack_fuobject_item: self.pack_fuobject_item.unwrap_or(false),
+            build_config: self.build_config,
             target_triplet: self
                 .target_triplet
                 .unwrap_or_else(structs::default_target_triplet),
@@ -558,7 +552,7 @@ pub async fn resolve_config(
     overrides: &ConfigOverrides,
 ) -> Result<Config> {
     let results = resolve(image, Resolution::resolver())?;
-    println!("{results:X?}");
+    crate::info!("{results:X?}");
 
     let engine_version = overrides.engine_version.or_else(|| {
         results
@@ -599,10 +593,11 @@ pub async fn resolve_config(
     let guobject_array = guobject_array.unwrap();
     let fname_pool = fname_pool.unwrap();
 
-    let case_preserving = match overrides.case_preserving {
-        Some(cp) => cp,
-        None => detect_case_preserving(mem, &results, engine_version).await?,
-    };
+    let mut build_config = overrides.build_config;
+    if !build_config.case_preserving {
+        build_config.case_preserving =
+            detect_case_preserving(mem, &results, engine_version).await?;
+    }
 
     Ok(Config {
         guobject_array,
@@ -613,8 +608,7 @@ pub async fn resolve_config(
             .build_change_list
             .clone()
             .or_else(|| results.build.as_ref().ok().map(|cl| cl.0.clone())),
-        case_preserving,
-        pack_fuobject_item: overrides.pack_fuobject_item.unwrap_or(false),
+        build_config,
         target_triplet: overrides
             .target_triplet
             .unwrap_or_else(structs::default_target_triplet),
@@ -664,17 +658,15 @@ pub async fn connect(
     image: &Image<'_>,
     overrides: ConfigOverrides,
     struct_info: Option<Structs>,
-    verbose: bool,
 ) -> Result<Ctx> {
     let config = resolve_config(&mem, image, &overrides).await?;
-    connect_manual(mem, config, struct_info, verbose).await
+    connect_manual(mem, config, struct_info).await
 }
 
 pub async fn connect_manual(
     mem: impl mem::Mem + 'static,
     config: Config,
     struct_info: Option<Structs>,
-    verbose: bool,
 ) -> Result<Ctx> {
     let engine_version = patternsleuth::resolvers::unreal::engine_version::EngineVersion {
         major: config.engine_version.0,
@@ -686,8 +678,7 @@ pub async fn connect_manual(
     } else {
         structs::get_struct_info_for_version(
             &engine_version,
-            config.case_preserving,
-            config.pack_fuobject_item,
+            config.build_config,
             config.target_triplet,
         )
         .with_context(|| {
@@ -695,7 +686,7 @@ pub async fn connect_manual(
         })?
     };
 
-    if verbose {
+    if diag::is_verbose() {
         print_struct_layouts(&struct_info);
     }
 
@@ -708,7 +699,7 @@ pub async fn connect_manual(
             .map(|s| (s.name.clone(), s))
             .collect(),
         version: config.engine_version,
-        case_preserving: config.case_preserving,
+        build_config: config.build_config,
         uobjectarray: config.guobject_array,
         image_base_address: config.image_base,
         build_change_list: config.build_change_list,
@@ -736,8 +727,8 @@ fn insert_object(objects: &mut BTreeMap<String, ObjectType>, path: String, objec
             let existing = e.get();
             let prefer_new =
                 has_canonical_cdo(&path, &object) && !has_canonical_cdo(&path, existing);
-            eprintln!(
-                "WARN: path collision {path}: existing {}, new {}",
+            crate::warn!(
+                "path collision {path}: existing {}, new {}",
                 existing.get_object().address,
                 object.get_object().address,
             );
@@ -779,7 +770,10 @@ async fn dump_one(
         return Ok(None);
     };
 
-    let path = obj.path().await?;
+    crate::trace!("[{i}/{num}] {0:#x}", obj.address());
+
+    if obj.vtable().address() == 0 {
+        return Ok(None);
 
     let filtered = options
         .filter_out_paths
@@ -793,6 +787,17 @@ async fn dump_one(
             eprintln!("[{i}/{num}] {path}");
         }
     }
+
+    let bad = match obj.internal_index().read().await {
+        Ok(index) => index as usize == i,
+        Err(_) => false,
+    };
+    if !bad {
+        crate::warn!("skipping bad GUObjectArray entry {i}: {:#x}", obj.address());
+        return Ok(None);
+    }
+
+    let path = obj.path().await?;
 
     if filtered {
         return Ok(None);
@@ -809,7 +814,11 @@ async fn dump_inner(mem: Ctx, source_name: &str, options: DumpOptions) -> Result
     let mut objects = BTreeMap::<String, ObjectType>::default();
     let mut child_map = HashMap::<String, BTreeSet<String>>::default();
 
-    let num = uobjectarray.num_elements().await? as usize;
+    let num = if !options.skip_objects {
+        uobjectarray.num_elements().await? as usize
+    } else {
+        0
+    };
 
     // keep many object dumps in flight
     let mut stream = futures_util::stream::iter(0..num)
@@ -840,7 +849,11 @@ async fn dump_inner(mem: Ctx, source_name: &str, options: DumpOptions) -> Result
         }
     }
 
-    let vtables = vtable::analyze_vtables(&mem, &mut objects).await;
+    let vtables = if options.skip_vtables {
+        BTreeMap::new()
+    } else {
+        vtable::analyze_vtables(&mem, &mut objects).await
+    };
 
     let names = if options.names {
         Some(extract_fnames(&mem).await?)
@@ -1515,12 +1528,23 @@ pub async fn read_class(obj: &Ptr<UClass>) -> Result<Class> {
     let class_flags = obj.class_flags().read().await?;
     let class_cast_flags = obj.class_cast_flags().read().await?;
     let class_default_object = opt_path(obj.class_default_object().read().await?).await?;
+
+    let mut interfaces = vec![];
+    for (class, pointer_offset, implemented_by_k2) in obj.read_interfaces().await? {
+        interfaces.push(ImplementedInterface {
+            class: opt_path(class).await?,
+            pointer_offset,
+            implemented_by_k2,
+        });
+    }
+
     Ok(Class {
         r#struct: read_struct(&obj.cast()).await?,
         class_flags,
         class_cast_flags,
         class_default_object,
         instance_vtable: None,
+        interfaces,
     })
 }
 

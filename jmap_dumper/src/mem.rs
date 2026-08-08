@@ -239,8 +239,8 @@ impl MachoCoreMem {
         let ncmds = u32::from_le_bytes(mmap[16..20].try_into().unwrap()) as usize;
         let sizeofcmds = u32::from_le_bytes(mmap[20..24].try_into().unwrap()) as usize;
         if filetype != MH_CORE {
-            eprintln!(
-                "note: Mach-O filetype is {filetype} (expected {MH_CORE} = MH_CORE); proceeding anyway"
+            crate::warn!(
+                "Mach-O filetype is {filetype} (expected {MH_CORE} = MH_CORE); proceeding anyway"
             );
         }
 
@@ -442,7 +442,7 @@ pub struct CtxInner {
     pub fnamepool: u64,
     pub structs: HashMap<String, StructInfo>,
     pub version: (u16, u16),
-    pub case_preserving: bool,
+    pub build_config: crate::structs::BuildConfig,
     pub uobjectarray: u64,
     pub image_base_address: u64,
     pub build_change_list: Option<String>,

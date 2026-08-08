@@ -3,6 +3,11 @@
 input int UE_VERSION;
 input bool WITH_CASE_PRESERVING_NAME = false;
 input bool UE_PACK_FUOBJECT_ITEM = false;
+input bool UE_EDITOR = false;
+input bool WITH_EDITOR = false;
+input bool WITH_EDITORONLY_DATA = false;
+input bool STATS = false;
+input bool UE_FUOBJECT_FLAGS_REFCOUNT = false;
 
 // Definitions for types with explicit sizes
 type int8_t = char;

@@ -1,7 +1,8 @@
 // Unreal Engine Property System
 
-import unreal::core::{UE_VERSION, int32_t, uint32_t, uint64_t, uint16_t, uint8_t};
-import unreal::unreal::{FName};
+import unreal::core::{UE_VERSION, WITH_EDITORONLY_DATA, WITH_EDITOR, int32_t, uint32_t, uint64_t, uint16_t, uint8_t};
+import unreal::unreal::{FName, FString};
+import unreal::containers::{TMap};
 import unreal::uobjectarray::{FThreadSafeCounter};
 import unreal::objects::{UField, UClass, UEnum, UScriptStruct, UFunction, EClassFlags};
 
@@ -24,6 +25,7 @@ struct TObjectPtr {
 
 /// TEST
 class FFieldClass {
+    if (UE_VERSION >= 508) uint64_t VTable;
     FName Name;
     if (UE_VERSION >= 507) EClassFlags ClassFlags;
     uint64_t Id;
@@ -50,6 +52,7 @@ class FField {
     FField* Next;
     FName NamePrivate;
     uint32_t FlagsPrivate; // EObjectFlags
+    if (WITH_EDITORONLY_DATA && (UE_VERSION < 505 || WITH_EDITOR)) TMap<FName, FString>* MetaDataMap;
 };
 
 // Unified type aliases - default to version-appropriate types
@@ -68,6 +71,7 @@ class ZProperty : ZField {
 
     if (UE_VERSION < 418) FName RepNotifyFunc;
     if (UE_VERSION >= 418) TEnumAsByte<ELifetimeCondition> BlueprintReplicationCondition;
+    if (WITH_EDITORONLY_DATA && UE_VERSION >= 505) int32_t IndexInOwner;
     int32_t Offset_Internal;
     if (UE_VERSION >= 414 && UE_VERSION < 418) uint32_t BlueprintReplicationCondition;
     if (UE_VERSION >= 418 && UE_VERSION < 503) FName RepNotifyFunc;

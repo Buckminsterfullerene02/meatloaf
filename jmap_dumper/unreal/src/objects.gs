@@ -1,4 +1,4 @@
-import unreal::core::{UE_VERSION, int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t, uintptr_t};
+import unreal::core::{UE_VERSION, UE_EDITOR, WITH_EDITOR, WITH_EDITORONLY_DATA, STATS, int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t, uintptr_t};
 import unreal::containers::{TArray, TMap};
 import unreal::properties::{
     ZField, ZProperty, ZStructProperty,
@@ -7,7 +7,7 @@ import unreal::properties::{
 import unreal::unreal::{
     FName, FString, STUB,
     FRepRecord, FImplementedInterface, FGCReferenceTokenStream,
-    FWindowsCriticalSection, FCriticalSection, FWindowsRWLock,
+    FWindowsCriticalSection, FCriticalSection, FRWLock,
     FNativeFunctionLookup, FTokenStreamOwner
 };
 
@@ -90,6 +90,7 @@ class UObject {
     UClass* ClassPrivate;
     FName NamePrivate;
     UObject* OuterPrivate;
+    if (STATS && UE_VERSION < 425) void* StatID;
 };
 
 /// TEST
@@ -98,7 +99,7 @@ class UField : UObject {
 };
 
 /// TEST
-class UStruct : UField, FStructBaseChain if (UE_VERSION >= 422) {
+class UStruct : UField, FStructBaseChain if (UE_VERSION >= 422 && (UE_VERSION >= 507 || !UE_EDITOR)) {
     UStruct* SuperStruct;
     UField* Children;
     if (UE_VERSION >= 425) FField* ChildProperties;
@@ -121,8 +122,17 @@ class UStruct : UField, FStructBaseChain if (UE_VERSION >= 422) {
 
     if (UE_VERSION >= 425) {
         STUB* UnresolvedScriptProperties;
+        if (WITH_EDITORONLY_DATA) {
+            TArray<UObject*> PropertyWrappers;
+            int32_t FieldPathSerialNumber;
+            if (UE_VERSION >= 506) int32_t TotalFieldCount;
+        }
         if (UE_VERSION < 500) STUB* UnversionedSchema;
         else STUB* UnversionedGameSchema;
+        if (UE_VERSION >= 506 && WITH_EDITORONLY_DATA) {
+            STUB* UnversionedEditorSchema;
+            bool bHasAssetRegistrySearchableProperties;
+        }
     }
 };
 
@@ -184,18 +194,23 @@ class UEnum : UField {
 
 struct ICppClassTypeInfo {};
 struct FUObjectCppClassStaticFunctions {
-    uint64_t Placeholder;
+    STUB* AddReferencedObjects;
+    if (WITH_EDITORONLY_DATA) {
+        STUB* DeclareCustomVersions;
+        STUB* AppendToClassSchema;
+        STUB* DeclareConstructClasses;
+    }
 };
 
 /// TEST
 class UClass : UStruct,
     FFastIndexingClassTreeRegistrar if (UE_VERSION >= 408 && UE_VERSION < 414),
-    FClassBaseChain if (UE_VERSION >= 414 && UE_VERSION < 422) {
+    FClassBaseChain if (UE_VERSION >= 414 && UE_VERSION < 422 && !UE_EDITOR) {
 
     STUB* ClassConstructor;
     if (UE_VERSION >= 408) STUB* ClassVTableHelperCtorCaller;
 
-    if (UE_VERSION >= 501) STUB* CppClassStaticFunctions;
+    if (UE_VERSION >= 501) FUObjectCppClassStaticFunctions CppClassStaticFunctions;
     else STUB* ClassAddReferencedObjects;
 
     if (UE_VERSION >= 408 && UE_VERSION < 418 || UE_VERSION >= 500) uint32_t ClassUnique;
@@ -207,13 +222,20 @@ class UClass : UStruct,
         uint32_t ClassUnique : 1;
         uint32_t bCooked : 1;
     }
+    if (UE_VERSION >= 508) {
+        bool bNeedsDynamicSubobjectInstancing;
+        bool bNeedsPostLoadSubobjectInstancing;
+    }
+
+    if (UE_VERSION >= 508) int32_t PropertiesStartOffset;
     EClassFlags ClassFlags;
     EClassCastFlags ClassCastFlags;
      if (UE_VERSION < 408) int32_t ClassUnique;
 
     UClass* ClassWithin;
 
-    if (UE_VERSION < 500) UObject* ClassGeneratedBy;
+    if (UE_VERSION < 500 || WITH_EDITORONLY_DATA) UObject* ClassGeneratedBy;
+    if (WITH_EDITORONLY_DATA && UE_VERSION >= 425) ZField* PropertiesPendingDestruction;
     if (UE_VERSION == 421) ZStructProperty* UberGraphFramePointerProperty;
     FName ClassConfigName;
     if (UE_VERSION >= 408 && UE_VERSION < 418) bool bCooked;
@@ -227,21 +249,31 @@ class UClass : UStruct,
         STUB* SparseClassData;
         UScriptStruct* SparseClassDataStruct;
     }
-    if (UE_VERSION >= 507) bool bNeedsDynamicSubobjectInstancing;
+    if (UE_VERSION == 507) bool bNeedsDynamicSubobjectInstancing;
+    // TOptional<FCppClassTypeInfo>
+    if (WITH_EDITOR && UE_VERSION >= 418) {
+        uint64_t CppTypeInfoVTable;
+        STUB* CppTypeInfoStatic;
+        bool bCppTypeInfoIsSet;
+    }
     TMap<FName, UFunction*> FuncMap;
     if (UE_VERSION >= 411 && UE_VERSION < 418) {
         TMap<FName, UFunction*> ParentFuncMap;
         TMap<FName, UFunction*> InterfaceFuncMap;
     }
-    if (UE_VERSION >= 502) FWindowsRWLock FuncMapLock;
+    if (UE_VERSION >= 502) FRWLock FuncMapLock;
     if (UE_VERSION >= 418 && UE_VERSION < 503) {
         TMap<FName, UFunction*> SuperFuncMap;
-        if (UE_VERSION >= 421) FWindowsRWLock SuperFuncMapLock;
+        if (UE_VERSION >= 421) FRWLock SuperFuncMapLock;
     }
-    if (UE_VERSION >= 503) {
+    if (UE_VERSION >= 503 && UE_VERSION < 508) {
         TMap<FName, UFunction*> AllFunctionsCache;
-        FWindowsRWLock AllFunctionsCacheLock;
+        FRWLock AllFunctionsCacheLock;
+    } else if (UE_VERSION >= 508) {
+        FRWLock AllFunctionsCacheLock;
+        TMap<FName, UFunction*> AllFunctionsCache;
     }
+
     TArray<FImplementedInterface> Interfaces;
     if (UE_VERSION >= 503) STUB* ReferenceSchema; // UE::GC::FSchemaOwner
     else if (UE_VERSION == 502) FTokenStreamOwner ReferenceTokens; // UE::GC::FTokenStreamOwner
@@ -250,4 +282,5 @@ class UClass : UStruct,
         if (UE_VERSION >= 415) FCriticalSection ReferenceTokenStreamCritical;
     }
     TArray<FNativeFunctionLookup> NativeFunctionLookupTable;
+    if (UE_VERSION >= 508) STUB* Partials; // UE::CoreUObject::Private::FPartialClass
 };

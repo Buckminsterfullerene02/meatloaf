@@ -19,18 +19,20 @@ struct TSizedHeapAllocator {
 // Inline Allocator Building Blocks
 // ============================================================================
 
+struct FDefaultAllocatorInstance : TSizedHeapAllocator<int32_t> {};
+
 // TInlineAllocator<N>::ForElementType<uint32> - for bit arrays
 template<int NumDWORDs>
 struct TInlineBitArrayAllocatorN {
     uint32_t InlineData[NumDWORDs];
-    FScriptElement* SecondaryData;
+    FDefaultAllocatorInstance SecondaryData;
 };
 
 // TInlineAllocator<N>::ForElementType<FSetElementId> - for hash buckets
 template<int NumBuckets>
 struct TInlineHashAllocatorN {
     int32_t InlineData[NumBuckets];  // FSetElementId is int32_t
-    FScriptElement* SecondaryData;
+    FDefaultAllocatorInstance SecondaryData;
 };
 
 // TInlineAllocator<N>::ForElementType<ElementType> - for element storage
@@ -38,7 +40,7 @@ template<int NumElements, typename ElementType>
 struct TInlineElementAllocatorN {
     type IndexType = int32_t;
     uint8_t InlineData[NumElements * sizeof(ElementType)];
-    FScriptElement* SecondaryData;
+    FDefaultAllocatorInstance SecondaryData;
 };
 
 // ============================================================================
@@ -48,7 +50,7 @@ struct TInlineElementAllocatorN {
 // Default: TInlineAllocator<4>::ForElementType<uint32> (128 bits inline)
 struct FDefaultBitArrayAllocator {
     uint32_t InlineData[4];
-    FScriptElement* SecondaryData;
+    FDefaultAllocatorInstance SecondaryData;
 };
 
 // ============================================================================
@@ -167,7 +169,7 @@ struct TMap {
 
 // Untyped script array - heap allocated data
 struct FScriptArray {
-    void* Data;
+    FDefaultAllocatorInstance AllocatorInstance;
     int32_t ArrayNum;
     int32_t ArrayMax;
 };

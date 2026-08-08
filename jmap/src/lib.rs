@@ -489,6 +489,8 @@ pub struct Class {
     pub class_default_object: Option<String>,
     /// VTable ptr of any instance of this UClass if found
     pub instance_vtable: Option<Address>,
+    #[serde(default)]
+    pub interfaces: Vec<ImplementedInterface>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
@@ -565,6 +567,13 @@ impl ObjectType {
             ObjectType::Function(_) => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImplementedInterface {
+    pub class: Option<String>,
+    pub pointer_offset: i32,
+    pub implemented_by_k2: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

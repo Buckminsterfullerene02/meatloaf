@@ -55,10 +55,38 @@ pub fn parse_target_triplet(s: &str) -> Result<TargetTriplet, String> {
     TargetTriplet::parse(s).ok_or_else(|| format!("invalid target triple {s:?}"))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BuildConfig {
+    #[serde(default)]
+    pub case_preserving: bool,
+    #[serde(default)]
+    pub pack_fuobject_item: bool,
+    #[serde(default)]
+    pub ue_editor: bool,
+    #[serde(default)]
+    pub with_editor: bool,
+    #[serde(default)]
+    pub with_editoronly_data: bool,
+    #[serde(default)]
+    pub stats: bool,
+    #[serde(default)]
+    pub fuobject_flags_refcount: bool,
+}
+
+impl BuildConfig {
+    pub fn editor() -> Self {
+        Self {
+            ue_editor: true,
+            with_editor: true,
+            with_editoronly_data: true,
+            ..Default::default()
+        }
+    }
+}
+
 pub fn get_struct_info_for_version(
     version: &EngineVersion,
-    case_preserving: bool,
-    pack_fuobject_item: bool,
+    build_config: BuildConfig,
     target_triplet: TargetTriplet,
 ) -> Result<Structs> {
     let compiler_instance = CompilerInstance::create(Default::default());
@@ -121,6 +149,7 @@ pub fn get_struct_info_for_version(
         ("properties", "FScriptSparseArrayLayout"),
         ("properties", "FScriptSetLayout"),
         ("properties", "FScriptMapLayout"),
+        ("containers", "FDefaultAllocatorInstance"),
         ("containers", "FDefaultBitArrayAllocator"),
         ("containers", "FScriptArray"),
         ("containers", "FScriptBitArray"),
@@ -129,9 +158,11 @@ pub fn get_struct_info_for_version(
         ("containers", "FScriptMap"),
         ("unreal", "FName"),
         ("unreal", "FNameEntryAllocator"),
+        ("unreal", "FImplementedInterface"),
         ("properties", "FField"),
         ("properties", "FFieldClass"),
         ("properties", "FFieldVariant"),
+        ("package", "UPackage"),
     ];
 
     let mounted_container = vm_state.mount_container(container)?;
@@ -140,8 +171,25 @@ pub fn get_struct_info_for_version(
     let vm_options = GospelVMOptions::default()
         .target_triplet(target_triplet)
         .with_global("UE_VERSION", ue_version)
-        .with_global("WITH_CASE_PRESERVING_NAME", case_preserving as u64)
-        .with_global("UE_PACK_FUOBJECT_ITEM", pack_fuobject_item as u64);
+        .with_global(
+            "WITH_CASE_PRESERVING_NAME",
+            build_config.case_preserving as u64,
+        )
+        .with_global(
+            "UE_PACK_FUOBJECT_ITEM",
+            build_config.pack_fuobject_item as u64,
+        )
+        .with_global("UE_EDITOR", build_config.ue_editor as u64)
+        .with_global("WITH_EDITOR", build_config.with_editor as u64)
+        .with_global(
+            "WITH_EDITORONLY_DATA",
+            build_config.with_editoronly_data as u64,
+        )
+        .with_global("STATS", build_config.stats as u64)
+        .with_global(
+            "UE_FUOBJECT_FLAGS_REFCOUNT",
+            build_config.fuobject_flags_refcount as u64,
+        );
     let mut execution_context = GospelVMRunContext::create(vm_options);
 
     for (file_name, struct_name) in struct_names {
